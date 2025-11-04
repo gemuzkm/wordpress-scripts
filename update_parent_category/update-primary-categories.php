@@ -1,10 +1,10 @@
 <?php
 /**
- * Скрипт для массового назначения основной категории (Primary Category) в SEOPress
- * Для использования с WP-CLI: wp eval-file update-primary-categories.php
+ * Script for bulk assignment of primary categories in SEOPress
+ * For use with WP-CLI: wp eval-file update-primary-categories.php
  */
 
-// Функция для безопасного вывода в консоль
+// Function for safe console output
 function cli_log($message) {
     if (defined('WP_CLI') && WP_CLI) {
         WP_CLI::log($message);
@@ -29,7 +29,7 @@ function cli_warning($message) {
     }
 }
 
-// Функция для определения самой глубокой категории
+// Function to find the deepest category
 function find_deepest_category($categories) {
     if (empty($categories)) {
         return null;
@@ -56,7 +56,7 @@ function find_deepest_category($categories) {
             }
         }
 
-        // Находим самую глубокую категорию
+        // Find the deepest category
         if ($level > $max_level) {
             $max_level = $level;
             $deepest_category = $cat_id;
@@ -66,27 +66,27 @@ function find_deepest_category($categories) {
     return $deepest_category;
 }
 
-// Основная функция обновления
+// Main update function
 function bulk_update_primary_categories() {
     global $wpdb;
 
-    // Параметры обработки
+    // Processing parameters
     $batch_size = 100;
     $offset = 0;
     $processed_count = 0;
     $updated_count = 0;
     $skipped_count = 0;
 
-    cli_log("Начинаем массовое обновление основных категорий...");
-    cli_log("Размер порции: " . $batch_size);
+    cli_log("Starting bulk update of primary categories...");
+    cli_log("Batch size: " . $batch_size);
 
-    // Получаем общее количество постов для прогресса
+    // Get total post count for progress
     $total_posts = wp_count_posts('post');
     $total_published = $total_posts->publish;
-    cli_log("Всего опубликованных постов: " . $total_published);
+    cli_log("Total published posts: " . $total_published);
 
     do {
-        // Получаем порцию постов
+        // Get batch of posts
         $posts = get_posts(array(
             'post_type' => 'post',
             'post_status' => 'publish',
@@ -100,78 +100,78 @@ function bulk_update_primary_categories() {
             break;
         }
 
-        cli_log("Обрабатываем посты " . ($offset + 1) . " - " . ($offset + count($posts)) . " из " . $total_published);
+        cli_log("Processing posts " . ($offset + 1) . " - " . ($offset + count($posts)) . " of " . $total_published);
 
         foreach ($posts as $post_id) {
             $processed_count++;
 
-            // Получаем категории поста
+            // Get post categories
             $categories = wp_get_post_categories($post_id);
 
             if (empty($categories)) {
-                cli_log("  Пост {$post_id}: пропущен (нет категорий)");
+                cli_log("  Пост {$post_id}: skipped (no categories)");
                 $skipped_count++;
                 continue;
             }
 
-            // Проверяем, уже ли установлена основная категория
+            // Check if primary category is already set
             $existing_primary = get_post_meta($post_id, '_seopress_robots_primary_cat', true);
 
-            // Находим самую глубокую категорию
+            // Find the deepest category
             $deepest_category = find_deepest_category($categories);
 
             if (!$deepest_category) {
-                cli_log("  Пост {$post_id}: пропущен (не удалось определить глубокую категорию)");
+                cli_log("  Пост {$post_id}: skipped (could not determine deep category)");
                 $skipped_count++;
                 continue;
             }
 
-            // Если уже есть основная категория и она совпадает с найденной
+            // If primary category already exists and matches the found one
             if ($existing_primary && $existing_primary == $deepest_category) {
-                cli_log("  Пост {$post_id}: пропущен (уже установлена правильная основная категория {$deepest_category})");
+                cli_log("  Пост {$post_id}: skipped (correct primary category already set {$deepest_category})");
                 $skipped_count++;
                 continue;
             }
 
-            // Обновляем основную категорию
+            // Update primary category
             $result = update_post_meta($post_id, '_seopress_robots_primary_cat', $deepest_category);
 
             if ($result) {
                 $category_name = get_category($deepest_category)->name;
-                cli_log("  Пост {$post_id}: обновлен (основная категория: {$category_name} [ID: {$deepest_category}])");
+                cli_log("  Пост {$post_id}: updated (primary category: {$category_name} [ID: {$deepest_category}])");
                 $updated_count++;
             } else {
-                cli_warning("  Пост {$post_id}: ошибка при обновлении");
+                cli_warning("  Пост {$post_id}: error during update");
             }
         }
 
         $offset += $batch_size;
 
-        // Очистка памяти каждые 100 постов
+        // Memory cleanup every 100 posts
         wp_cache_flush();
 
-        // Показываем прогресс
+        // Show progress
         $progress = round(($processed_count / $total_published) * 100, 1);
-        cli_log("Прогресс: {$progress}% ({$processed_count}/{$total_published})");
+        cli_log("Progress: {$progress}% ({$processed_count}/{$total_published})");
 
-        // Небольшая пауза для снижения нагрузки на сервер
+        // Small pause to reduce server load
         if (function_exists('sleep')) {
             sleep(1);
         }
 
     } while (count($posts) == $batch_size);
 
-    // Финальная статистика
-    cli_success("=== ЗАВЕРШЕНО ===");
-    cli_success("Всего обработано постов: " . $processed_count);
-    cli_success("Обновлено: " . $updated_count);
-    cli_success("Пропущено: " . $skipped_count);
+    // Final statistics
+    cli_success("=== COMPLETED ===");
+    cli_success("Total posts processed: " . $processed_count);
+    cli_success("Updated: " . $updated_count);
+    cli_success("Skipped: " . $skipped_count);
     cli_success("=================");
 }
 
-// Функция для тестирования на небольшой выборке
+// Function for testing on a small sample
 function test_primary_categories($limit = 10) {
-    cli_log("Тестовый режим: обработка {$limit} постов");
+    cli_log("Test mode: processing {$limit} posts");
 
     $posts = get_posts(array(
         'post_type' => 'post',
@@ -187,11 +187,11 @@ function test_primary_categories($limit = 10) {
         cli_log("\nПост {$post_id}: '{$post_title}'");
 
         if (empty($categories)) {
-            cli_log("  Категорий нет");
+            cli_log("  No categories");
             continue;
         }
 
-        cli_log("  Категории:");
+        cli_log("  Categories:");
         foreach ($categories as $cat_id) {
             $cat = get_category($cat_id);
             $level = 0;
@@ -203,26 +203,26 @@ function test_primary_categories($limit = 10) {
             }
 
             $indent = str_repeat("    ", $level);
-            cli_log("    {$indent}- {$cat->name} [ID: {$cat_id}, Уровень: {$level}]");
+            cli_log("    {$indent}- {$cat->name} [ID: {$cat_id}, Level: {$level}]");
         }
 
         $deepest = find_deepest_category($categories);
         if ($deepest) {
             $deepest_cat = get_category($deepest);
-            cli_log("  Рекомендуемая основная: {$deepest_cat->name} [ID: {$deepest}]");
+            cli_log("  Recommended primary: {$deepest_cat->name} [ID: {$deepest}]");
         }
 
         $existing = get_post_meta($post_id, '_seopress_robots_primary_cat', true);
         if ($existing) {
             $existing_cat = get_category($existing);
-            cli_log("  Текущая основная: {$existing_cat->name} [ID: {$existing}]");
+            cli_log("  Current primary: {$existing_cat->name} [ID: {$existing}]");
         } else {
-            cli_log("  Текущая основная: не установлена");
+            cli_log("  Current primary: not set");
         }
     }
 }
 
-// Проверяем аргументы командной строки
+// Check command line arguments
 if (isset($args) && !empty($args)) {
     $command = $args[0];
 
@@ -237,13 +237,13 @@ if (isset($args) && !empty($args)) {
             break;
 
         default:
-            cli_log("Доступные команды:");
-            cli_log("  test [количество] - Тестирование на небольшой выборке");
-            cli_log("  update - Массовое обновление всех постов");
+            cli_log("Available commands:");
+            cli_log("  test [count] - Testing on a small sample");
+            cli_log("  update - Массовое обновление всех posts");
             break;
     }
 } else {
-    // Если нет аргументов, запускаем массовое обновление
+    // If no arguments, run bulk update
     bulk_update_primary_categories();
 }
 ?>
