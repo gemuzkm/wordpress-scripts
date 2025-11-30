@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Relevanssi Redis Cache
  * Description: Caches Relevanssi search results in Redis
- * Version: 1.2
+ * Version: 1.4
  * Author: Your Name
  */
 
@@ -10,52 +10,86 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// Функция для прямой записи в лог
+function relevanssi_cache_log($message) {
+    $log_file = WP_CONTENT_DIR . '/relevanssi-cache-debug.log';
+    $timestamp = date('Y-m-d H:i:s');
+    file_put_contents($log_file, "[$timestamp] $message\n", FILE_APPEND);
+}
+
+relevanssi_cache_log('Plugin file loaded');
+
 class Relevanssi_Redis_Cache {
     
     private $cache_group = 'relevanssi_search';
-    private $cache_expiration = 86400; // 24 hours
+    private $cache_expiration = 86400;
     
     public function __construct() {
-        // Используем конкретные хуки Relevanssi вместо 'all'
-        add_filter('relevanssi_hits_filter', array($this, 'cache_results'), 99, 2);
+        relevanssi_cache_log('Class constructor called');
         
-        // Очистка кеша
+        add_filter('relevanssi_hits_filter', array($this, 'cache_results'), 99, 2);
+        add_filter('relevanssi_results', array($this, 'cache_results_simple'), 99, 1);
+        
         add_action('save_post', array($this, 'clear_cache'));
         add_action('deleted_post', array($this, 'clear_cache'));
+        
+        relevanssi_cache_log('Hooks registered');
     }
     
-    /**
-     * Кеширует результаты поиска
-     */
     public function cache_results($hits, $query_args) {
+        relevanssi_cache_log('relevanssi_hits_filter fired with ' . count($hits) . ' results');
+        
         if (empty($query_args) || !isset($query_args['s'])) {
+            relevanssi_cache_log('No search query in args');
             return $hits;
         }
         
-        // Генерируем ключ кеша
         $cache_key = $this->generate_cache_key($query_args);
+        relevanssi_cache_log('Cache key: ' . $cache_key);
         
-        // Проверяем кеш
         $cached = wp_cache_get($cache_key, $this->cache_group);
         
         if ($cached !== false && is_array($cached)) {
-            // Найдено в кеше
-            error_log('[Relevanssi Cache] HIT: ' . $cache_key);
+            relevanssi_cache_log('CACHE HIT: ' . $cache_key);
             return $cached;
         }
         
-        // Кеша нет - сохраняем результаты
         if (!empty($hits)) {
-            wp_cache_set($cache_key, $hits, $this->cache_group, $this->cache_expiration);
-            error_log('[Relevanssi Cache] MISS: ' . $cache_key . ' - Saved ' . count($hits) . ' results');
+            $result = wp_cache_set($cache_key, $hits, $this->cache_group, $this->cache_expiration);
+            relevanssi_cache_log('CACHE MISS: ' . $cache_key . ' - Saved: ' . ($result ? 'YES' : 'NO') . ' (' . count($hits) . ' results)');
         }
         
         return $hits;
     }
     
-    /**
-     * Генерация ключа кеша
-     */
+    public function cache_results_simple($hits) {
+        global $wp_query;
+        
+        relevanssi_cache_log('relevanssi_results fired with ' . count($hits) . ' results');
+        
+        if (!isset($wp_query->query_vars['s']) || empty($wp_query->query_vars['s'])) {
+            relevanssi_cache_log('No search query in wp_query');
+            return $hits;
+        }
+        
+        $cache_key = $this->generate_cache_key_from_wp_query($wp_query);
+        relevanssi_cache_log('Cache key (simple): ' . $cache_key);
+        
+        $cached = wp_cache_get($cache_key, $this->cache_group);
+        
+        if ($cached !== false && is_array($cached)) {
+            relevanssi_cache_log('CACHE HIT (simple): ' . $cache_key);
+            return $cached;
+        }
+        
+        if (!empty($hits)) {
+            $result = wp_cache_set($cache_key, $hits, $this->cache_group, $this->cache_expiration);
+            relevanssi_cache_log('CACHE MISS (simple): ' . $cache_key . ' - Saved: ' . ($result ? 'YES' : 'NO'));
+        }
+        
+        return $hits;
+    }
+    
     private function generate_cache_key($query_args) {
         $key_parts = array();
         
@@ -78,36 +112,58 @@ class Relevanssi_Redis_Cache {
         return 'search_' . md5(serialize($key_parts));
     }
     
-    /**
-     * Очистка кеша
-     */
+    private function generate_cache_key_from_wp_query($query) {
+        $key_parts = array();
+        
+        if (isset($query->query_vars['s'])) {
+            $key_parts['s'] = sanitize_text_field($query->query_vars['s']);
+        }
+        
+        if (isset($query->query_vars['post_type'])) {
+            $key_parts['post_type'] = $query->query_vars['post_type'];
+        }
+        
+        if (isset($query->query_vars['posts_per_page'])) {
+            $key_parts['posts_per_page'] = $query->query_vars['posts_per_page'];
+        }
+        
+        if (isset($query->query_vars['paged'])) {
+            $key_parts['paged'] = $query->query_vars['paged'];
+        }
+        
+        return 'search_' . md5(serialize($key_parts));
+    }
+    
     public function clear_cache($post_id = null) {
+        relevanssi_cache_log('clear_cache called');
+        
         if (function_exists('wp_cache_flush_group')) {
             wp_cache_flush_group($this->cache_group);
         } else {
             wp_cache_flush();
         }
-        error_log('[Relevanssi Cache] Cache cleared');
     }
 }
 
-// Инициализация
+// Проверка, что Relevanssi активен
 if (function_exists('relevanssi_search') || function_exists('relevanssi_do_query')) {
     new Relevanssi_Redis_Cache();
+    relevanssi_cache_log('Relevanssi Cache initialized - Relevanssi is active');
+} else {
+    relevanssi_cache_log('ERROR: Relevanssi not found!');
 }
 
-/**
- * Добавить группу в persistent cache
- */
+// Добавить группу в persistent cache
 add_action('init', function() {
+    relevanssi_cache_log('init action fired');
+    
     if (function_exists('wp_cache_add_global_groups')) {
         wp_cache_add_global_groups(array('relevanssi_search'));
+        relevanssi_cache_log('Global cache group added');
     }
 }, 1);
 
-/**
- * Кнопка очистки
- */
+// Админ-бар
 add_action('admin_bar_menu', function($wp_admin_bar) {
     if (!current_user_can('manage_options')) {
         return;
@@ -133,9 +189,7 @@ add_action('admin_post_clear_relevanssi_cache', function() {
     exit;
 });
 
-/**
- * Статистика
- */
+// Статистика
 add_action('admin_menu', function() {
     add_submenu_page(
         'options-general.php',
