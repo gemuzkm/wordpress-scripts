@@ -1,141 +1,136 @@
 <?php
 /**
  * Plugin Name: Relevanssi Redis Cache
- * Description: Caches Relevanssi search results in Redis
- * Version: 1.4
+ * Description: Caches Relevanssi search results in Redis for better performance
+ * Version: 2.2
  * Author: Your Name
+ * Requires Plugins: relevanssi-premium
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-// Функция для прямой записи в лог
+// Функция логирования
 function relevanssi_cache_log($message) {
     $log_file = WP_CONTENT_DIR . '/relevanssi-cache-debug.log';
     $timestamp = date('Y-m-d H:i:s');
     file_put_contents($log_file, "[$timestamp] $message\n", FILE_APPEND);
 }
 
-relevanssi_cache_log('Plugin file loaded');
+relevanssi_cache_log('=== Plugin loaded v2.2 ===');
 
 class Relevanssi_Redis_Cache {
     
     private $cache_group = 'relevanssi_search';
-    private $cache_expiration = 86400;
+    private $cache_expiration = 86400; // 24 hours
     
     public function __construct() {
-        relevanssi_cache_log('Class constructor called');
+        relevanssi_cache_log('Constructor called');
         
-        add_filter('relevanssi_hits_filter', array($this, 'cache_results'), 99, 2);
-        add_filter('relevanssi_results', array($this, 'cache_results_simple'), 99, 1);
+        // Перехватываем поиск
+        add_filter('posts_pre_query', array($this, 'intercept_search'), 10, 2);
         
-        add_action('save_post', array($this, 'clear_cache'));
-        add_action('deleted_post', array($this, 'clear_cache'));
+        // Кешируем после поиска
+        add_action('wp', array($this, 'cache_after_search'), 999);
+        
+        // Очистка кеша
+        add_action('save_post', array($this, 'clear_cache_on_save'), 10, 2);
         
         relevanssi_cache_log('Hooks registered');
     }
     
-    public function cache_results($hits, $query_args) {
-        relevanssi_cache_log('relevanssi_hits_filter fired with ' . count($hits) . ' results');
-        
-        if (empty($query_args) || !isset($query_args['s'])) {
-            relevanssi_cache_log('No search query in args');
-            return $hits;
+    public function intercept_search($posts, $query) {
+        if (!$query->is_search() || !$query->is_main_query()) {
+            return $posts;
         }
         
-        $cache_key = $this->generate_cache_key($query_args);
+        $search_query = $query->get('s');
+        if (empty($search_query)) {
+            return $posts;
+        }
+        
+        relevanssi_cache_log('Search detected: ' . $search_query);
+        
+        $cache_key = $this->generate_cache_key($query);
         relevanssi_cache_log('Cache key: ' . $cache_key);
         
-        $cached = wp_cache_get($cache_key, $this->cache_group);
+        $cached_data = wp_cache_get($cache_key, $this->cache_group);
         
-        if ($cached !== false && is_array($cached)) {
-            relevanssi_cache_log('CACHE HIT: ' . $cache_key);
-            return $cached;
+        if ($cached_data !== false && is_array($cached_data)) {
+            relevanssi_cache_log('CACHE HIT! Returning ' . count($cached_data['posts']) . ' posts');
+            
+            $query->found_posts = $cached_data['found_posts'];
+            $query->max_num_pages = $cached_data['max_num_pages'];
+            
+            return $cached_data['posts'];
         }
         
-        if (!empty($hits)) {
-            $result = wp_cache_set($cache_key, $hits, $this->cache_group, $this->cache_expiration);
-            relevanssi_cache_log('CACHE MISS: ' . $cache_key . ' - Saved: ' . ($result ? 'YES' : 'NO') . ' (' . count($hits) . ' results)');
-        }
+        relevanssi_cache_log('CACHE MISS - proceeding with Relevanssi');
         
-        return $hits;
+        $query->relevanssi_cache_key = $cache_key;
+        
+        return null;
     }
     
-    public function cache_results_simple($hits) {
+    public function cache_after_search() {
         global $wp_query;
         
-        relevanssi_cache_log('relevanssi_results fired with ' . count($hits) . ' results');
-        
-        if (!isset($wp_query->query_vars['s']) || empty($wp_query->query_vars['s'])) {
-            relevanssi_cache_log('No search query in wp_query');
-            return $hits;
+        if (!$wp_query->is_search() || !isset($wp_query->relevanssi_cache_key)) {
+            return;
         }
         
-        $cache_key = $this->generate_cache_key_from_wp_query($wp_query);
-        relevanssi_cache_log('Cache key (simple): ' . $cache_key);
+        $cache_key = $wp_query->relevanssi_cache_key;
         
-        $cached = wp_cache_get($cache_key, $this->cache_group);
-        
-        if ($cached !== false && is_array($cached)) {
-            relevanssi_cache_log('CACHE HIT (simple): ' . $cache_key);
-            return $cached;
+        if (empty($wp_query->posts)) {
+            relevanssi_cache_log('No posts to cache');
+            return;
         }
         
-        if (!empty($hits)) {
-            $result = wp_cache_set($cache_key, $hits, $this->cache_group, $this->cache_expiration);
-            relevanssi_cache_log('CACHE MISS (simple): ' . $cache_key . ' - Saved: ' . ($result ? 'YES' : 'NO'));
-        }
+        $cache_data = array(
+            'posts' => $wp_query->posts,
+            'found_posts' => $wp_query->found_posts,
+            'max_num_pages' => $wp_query->max_num_pages,
+            'timestamp' => time()
+        );
         
-        return $hits;
+        $result = wp_cache_set($cache_key, $cache_data, $this->cache_group, $this->cache_expiration);
+        
+        relevanssi_cache_log('Cached: ' . ($result ? 'SUCCESS' : 'FAILED') . ' (' . count($wp_query->posts) . ' posts)');
     }
     
-    private function generate_cache_key($query_args) {
+    private function generate_cache_key($query) {
         $key_parts = array();
         
-        if (isset($query_args['s'])) {
-            $key_parts['s'] = sanitize_text_field($query_args['s']);
+        if ($s = $query->get('s')) {
+            $key_parts['s'] = sanitize_text_field($s);
         }
         
-        if (isset($query_args['post_type'])) {
-            $key_parts['post_type'] = $query_args['post_type'];
+        if ($post_type = $query->get('post_type')) {
+            $key_parts['post_type'] = $post_type;
         }
         
-        if (isset($query_args['posts_per_page'])) {
-            $key_parts['posts_per_page'] = $query_args['posts_per_page'];
+        if ($posts_per_page = $query->get('posts_per_page')) {
+            $key_parts['posts_per_page'] = $posts_per_page;
         }
         
-        if (isset($query_args['paged'])) {
-            $key_parts['paged'] = $query_args['paged'];
+        if ($paged = $query->get('paged')) {
+            $key_parts['paged'] = $paged;
         }
         
         return 'search_' . md5(serialize($key_parts));
     }
     
-    private function generate_cache_key_from_wp_query($query) {
-        $key_parts = array();
-        
-        if (isset($query->query_vars['s'])) {
-            $key_parts['s'] = sanitize_text_field($query->query_vars['s']);
+    public function clear_cache_on_save($post_id, $post) {
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+            return;
         }
         
-        if (isset($query->query_vars['post_type'])) {
-            $key_parts['post_type'] = $query->query_vars['post_type'];
+        if (in_array($post->post_type, array('seopress_404', 'revision'))) {
+            return;
         }
         
-        if (isset($query->query_vars['posts_per_page'])) {
-            $key_parts['posts_per_page'] = $query->query_vars['posts_per_page'];
-        }
-        
-        if (isset($query->query_vars['paged'])) {
-            $key_parts['paged'] = $query->query_vars['paged'];
-        }
-        
-        return 'search_' . md5(serialize($key_parts));
-    }
-    
-    public function clear_cache($post_id = null) {
-        relevanssi_cache_log('clear_cache called');
+        relevanssi_cache_log('Clearing cache for post: ' . $post_id);
         
         if (function_exists('wp_cache_flush_group')) {
             wp_cache_flush_group($this->cache_group);
@@ -145,18 +140,12 @@ class Relevanssi_Redis_Cache {
     }
 }
 
-// Проверка, что Relevanssi активен
-if (function_exists('relevanssi_search') || function_exists('relevanssi_do_query')) {
-    new Relevanssi_Redis_Cache();
-    relevanssi_cache_log('Relevanssi Cache initialized - Relevanssi is active');
-} else {
-    relevanssi_cache_log('ERROR: Relevanssi not found!');
-}
+// Инициализация - теперь Relevanssi уже загружен
+new Relevanssi_Redis_Cache();
+relevanssi_cache_log('Cache plugin initialized');
 
-// Добавить группу в persistent cache
+// Добавить в persistent cache
 add_action('init', function() {
-    relevanssi_cache_log('init action fired');
-    
     if (function_exists('wp_cache_add_global_groups')) {
         wp_cache_add_global_groups(array('relevanssi_search'));
         relevanssi_cache_log('Global cache group added');
@@ -221,7 +210,7 @@ add_action('admin_menu', function() {
                 
                 echo '<p><a href="' . wp_nonce_url(admin_url('admin-post.php?action=clear_relevanssi_cache'), 'clear_cache') . '" class="button button-primary">Clear Search Cache</a></p>';
             } else {
-                echo '<div class="notice notice-error"><p>Redis Object Cache not active</p></div>';
+                echo '<div class="notice notice-error"><p>Redis not active</p></div>';
             }
             
             echo '</div>';
