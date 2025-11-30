@@ -1,24 +1,16 @@
 <?php
 /**
  * Plugin Name: Relevanssi Redis Cache
- * Description: Caches Relevanssi search results in Redis for better performance
- * Version: 2.2
- * Author: Your Name
+ * Description: Caches Relevanssi search results in Redis for improved performance
+ * Version: 1.0.0
+ * Author: ProCarManuals
  * Requires Plugins: relevanssi-premium
+ * License: GPL v2 or later
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
-
-// Функция логирования
-function relevanssi_cache_log($message) {
-    $log_file = WP_CONTENT_DIR . '/relevanssi-cache-debug.log';
-    $timestamp = date('Y-m-d H:i:s');
-    file_put_contents($log_file, "[$timestamp] $message\n", FILE_APPEND);
-}
-
-relevanssi_cache_log('=== Plugin loaded v2.2 ===');
 
 class Relevanssi_Redis_Cache {
     
@@ -26,21 +18,22 @@ class Relevanssi_Redis_Cache {
     private $cache_expiration = 86400; // 24 hours
     
     public function __construct() {
-        relevanssi_cache_log('Constructor called');
-        
-        // Перехватываем поиск
+        // Intercept search queries
         add_filter('posts_pre_query', array($this, 'intercept_search'), 10, 2);
         
-        // Кешируем после поиска
+        // Cache results after search
         add_action('wp', array($this, 'cache_after_search'), 999);
         
-        // Очистка кеша
+        // Clear cache on post changes
         add_action('save_post', array($this, 'clear_cache_on_save'), 10, 2);
-        
-        relevanssi_cache_log('Hooks registered');
+        add_action('deleted_post', array($this, 'clear_cache'));
     }
     
+    /**
+     * Intercept search and check cache
+     */
     public function intercept_search($posts, $query) {
+        // Only for main search query
         if (!$query->is_search() || !$query->is_main_query()) {
             return $posts;
         }
@@ -50,29 +43,29 @@ class Relevanssi_Redis_Cache {
             return $posts;
         }
         
-        relevanssi_cache_log('Search detected: ' . $search_query);
-        
+        // Generate cache key
         $cache_key = $this->generate_cache_key($query);
-        relevanssi_cache_log('Cache key: ' . $cache_key);
         
+        // Check cache
         $cached_data = wp_cache_get($cache_key, $this->cache_group);
         
         if ($cached_data !== false && is_array($cached_data)) {
-            relevanssi_cache_log('CACHE HIT! Returning ' . count($cached_data['posts']) . ' posts');
-            
+            // Restore from cache
             $query->found_posts = $cached_data['found_posts'];
             $query->max_num_pages = $cached_data['max_num_pages'];
             
             return $cached_data['posts'];
         }
         
-        relevanssi_cache_log('CACHE MISS - proceeding with Relevanssi');
-        
+        // Save key for caching later
         $query->relevanssi_cache_key = $cache_key;
         
         return null;
     }
     
+    /**
+     * Cache results after Relevanssi search
+     */
     public function cache_after_search() {
         global $wp_query;
         
@@ -80,12 +73,11 @@ class Relevanssi_Redis_Cache {
             return;
         }
         
-        $cache_key = $wp_query->relevanssi_cache_key;
-        
         if (empty($wp_query->posts)) {
-            relevanssi_cache_log('No posts to cache');
             return;
         }
+        
+        $cache_key = $wp_query->relevanssi_cache_key;
         
         $cache_data = array(
             'posts' => $wp_query->posts,
@@ -94,11 +86,12 @@ class Relevanssi_Redis_Cache {
             'timestamp' => time()
         );
         
-        $result = wp_cache_set($cache_key, $cache_data, $this->cache_group, $this->cache_expiration);
-        
-        relevanssi_cache_log('Cached: ' . ($result ? 'SUCCESS' : 'FAILED') . ' (' . count($wp_query->posts) . ' posts)');
+        wp_cache_set($cache_key, $cache_data, $this->cache_group, $this->cache_expiration);
     }
     
+    /**
+     * Generate cache key
+     */
     private function generate_cache_key($query) {
         $key_parts = array();
         
@@ -121,17 +114,27 @@ class Relevanssi_Redis_Cache {
         return 'search_' . md5(serialize($key_parts));
     }
     
+    /**
+     * Clear cache on post save
+     */
     public function clear_cache_on_save($post_id, $post) {
+        // Ignore autosaves
         if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
             return;
         }
         
-        if (in_array($post->post_type, array('seopress_404', 'revision'))) {
+        // Ignore technical post types
+        if (in_array($post->post_type, array('seopress_404', 'revision', 'nav_menu_item'))) {
             return;
         }
         
-        relevanssi_cache_log('Clearing cache for post: ' . $post_id);
-        
+        $this->clear_cache();
+    }
+    
+    /**
+     * Clear all search cache
+     */
+    public function clear_cache() {
         if (function_exists('wp_cache_flush_group')) {
             wp_cache_flush_group($this->cache_group);
         } else {
@@ -140,19 +143,21 @@ class Relevanssi_Redis_Cache {
     }
 }
 
-// Инициализация - теперь Relevanssi уже загружен
+// Initialize plugin
 new Relevanssi_Redis_Cache();
-relevanssi_cache_log('Cache plugin initialized');
 
-// Добавить в persistent cache
+/**
+ * Add to persistent cache
+ */
 add_action('init', function() {
     if (function_exists('wp_cache_add_global_groups')) {
         wp_cache_add_global_groups(array('relevanssi_search'));
-        relevanssi_cache_log('Global cache group added');
     }
 }, 1);
 
-// Админ-бар
+/**
+ * Admin bar button
+ */
 add_action('admin_bar_menu', function($wp_admin_bar) {
     if (!current_user_can('manage_options')) {
         return;
@@ -178,7 +183,9 @@ add_action('admin_post_clear_relevanssi_cache', function() {
     exit;
 });
 
-// Статистика
+/**
+ * Statistics page
+ */
 add_action('admin_menu', function() {
     add_submenu_page(
         'options-general.php',
@@ -190,10 +197,10 @@ add_action('admin_menu', function() {
             global $wp_object_cache;
             
             echo '<div class="wrap">';
-            echo '<h1>Redis Cache Statistics</h1>';
+            echo '<h1>Search Cache Statistics</h1>';
             
             if (isset($_GET['cache_cleared'])) {
-                echo '<div class="notice notice-success"><p>Cache cleared!</p></div>';
+                echo '<div class="notice notice-success"><p>Cache cleared successfully!</p></div>';
             }
             
             if (isset($wp_object_cache->cache_hits) && isset($wp_object_cache->cache_misses)) {
@@ -210,7 +217,7 @@ add_action('admin_menu', function() {
                 
                 echo '<p><a href="' . wp_nonce_url(admin_url('admin-post.php?action=clear_relevanssi_cache'), 'clear_cache') . '" class="button button-primary">Clear Search Cache</a></p>';
             } else {
-                echo '<div class="notice notice-error"><p>Redis not active</p></div>';
+                echo '<div class="notice notice-warning"><p>Redis Object Cache is not active or not installed.</p></div>';
             }
             
             echo '</div>';
