@@ -1,0 +1,1 @@
+The script performs a massive update of the _seopress_robots_primary_cat field (the SEOPress meta field)
